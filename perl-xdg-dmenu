@@ -1,0 +1,218 @@
+#!/usr/bin/perl
+#
+# Copyright (C) 2019 Robert Imschweiler
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+# 
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+
+# cf. https://standards.freedesktop.org/desktop-entry-spec/latest/
+# for all information on the .desktop-file specification
+
+
+use strict;
+use warnings;
+use IPC::Open2;
+use feature 'fc';
+
+
+# Begin: userconfig
+my $apps_path = "$ENV{HOME}/.local/share/applications";
+my $system_path = "/usr/share/applications";
+my $menu_prefix = "→ ";
+my $menu_back = "←";
+my $dmenu_cmd = "dmenu -fn DejaVuSansMono-12 -i -l 25 -nb \'#a1883d\' -nf "
+		. "\'#503e06\' -sb \'#00a2bf\' -sf \'#503e06\'";
+
+# please use the pipe symbol (|) as separator for multiple categories
+my %menus = (
+	"AudioVideo" => "AudioVideo",
+	"Development" => "Development",
+	"Education" => "Education",
+	"Game" => "Game",
+	"Graphics" => "Graphics",
+	"Network" => "Network",
+	"Office" => "Education|Office|Science",
+	"Science" => "Science",
+	"Settings" => "Settings",
+	"System" => "System",
+	"Utility" => "Utility|Utilities",
+	"Leave" => "Leave",
+);
+
+# you do not have to use all the menus of the array above, but you
+# cannot use a menu entry which is not contained in the array above
+my @menu_order = (
+	"AudioVideo",
+	"Development",
+	"Education",
+	"Game",
+	"Graphics",
+	"Network",
+	"Office",
+	"Science",
+	"Settings",
+	"System",
+	"Utility",
+	"Leave",
+);
+# End: userconfig
+
+
+die $! if (! -d $apps_path || ! -x $apps_path 
+	|| ! -d $system_path || ! -x $system_path);
+
+
+my %categories;
+my %files;
+my %apps;
+
+
+# disregard menus for which no entry is available
+sub check_menus {
+	my $plain_cats = join("|", values(%categories));
+	my @delete;
+	for my $i (0 .. $#menu_order) {
+		die $! if (!exists($menus{$menu_order[$i]}));
+		if ($menus{$menu_order[$i]} !~ m/($plain_cats)/) {
+			# delete array element
+			push @delete, $menu_order[$i];
+		}
+	}
+	for (@delete) {
+		my $i = 0;
+		$i++ until $menu_order[$i] eq $_;
+		splice(@menu_order, $i, 1);
+	}
+}
+
+sub dmenu {
+	open2(my $IN, my $OUT, $dmenu_cmd) or die $!;
+	print($OUT map { $_ . "\n" } @_);
+	close($OUT);
+	my $selection = <$IN>;
+	close($IN);
+
+	exit 0 if (!$selection);
+	chomp($selection);
+
+	return $selection;
+}
+
+sub get_apps {
+	my $menu = shift;
+
+	%apps = ();
+	for (keys(%categories)) {
+		if ($categories{$_} !~ m/($menus{$menu})/) {
+			next;
+		}
+		if ($files{$_} =~ m/^Name\s*=\s*(.*)/m) {
+			$apps{$1} = $_;
+		}
+	}
+}
+
+# cf. https://standards.freedesktop.org/desktop-entry-spec/latest/ar01s07.html
+sub get_command {
+	my $name = shift;
+	if ($files{$name} =~ m/^Exec\s*=\s*(.*)/m) {
+		return $1 =~ s/ %[[:alpha:]]$//r;
+	} else {
+		return "";
+	}
+}
+
+# get files from $apps_path
+sub get_userfiles {
+	opendir(my $DH, $apps_path);
+	while (readdir($DH)) {
+		next if ($_ !~ m/\.desktop/);
+		$files{"$apps_path/$_"} = undef;
+	}
+	closedir($DH);
+}
+
+# get files from $system_path which are not in $apps_path
+sub get_systemfiles {
+	opendir(my $DH, $system_path);
+	while (readdir($DH)) {
+		next if ($_ !~ m/\.desktop$/ || 
+			exists($files{"$apps_path/$_"}));
+		$files{"$system_path/$_"} = undef;
+	}
+	closedir($DH);
+}
+
+sub terminal_app {
+	my $name = shift;
+	if ($files{$name} =~ m/^Terminal\s*=\s*true/m) {
+		return 1;
+	} else {
+		return 0;
+	}
+}
+
+
+get_userfiles();
+get_systemfiles();
+
+# get relevant file parts;
+# disregard files which shall not be displayed;
+# collect all categories from the remaining files
+for my $file (keys(%files)) {
+	open(my $FH, "<", $file) or next;
+	while (<$FH>) {
+		last if ($_ =~ m/^\[Desktop Entry\]/m);
+	}
+	while (<$FH>) {
+		$files{$file} .= $_;
+		last if ($_ =~ m/^\[/);
+	}
+	close($FH);
+	if ($files{$file} =~ m/^NoDisplay\s*=\s*true/m) {
+		delete($files{$file});
+		next;
+	}
+	if ($files{$file} =~ m/^Categories\s*=\s*(.*?)(;*$)/m) {
+		$categories{$file} = $1 =~ s/;/\|/gr;
+	}
+}
+
+check_menus();
+
+@menu_order = map { $menu_prefix . $_ } @menu_order;
+
+while (1) {
+	# show menus
+	my $menu = dmenu(@menu_order);
+	$menu =~ s/^$menu_prefix//;
+
+	# get apps for selected menu
+	get_apps($menu);
+
+	# show apps
+	my @apps_list = sort { fc($a) cmp fc($b) } keys(%apps);
+	unshift @apps_list, $menu_back;
+	my $app = dmenu(@apps_list);
+	next if ($app eq $menu_back);
+
+	my $file = $apps{$app};
+	my $command = get_command($file);
+	if (terminal_app($file)) {
+		exec "urxvt -e bash -c \"$command\" &" or die $!;
+	} else {
+		exec "$command &" or die $!;
+	}
+}
+
